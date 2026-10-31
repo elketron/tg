@@ -7,6 +7,7 @@ use std::path::Path;
 pub enum Language {
     Markdown,
     Rust,
+    #[value(name = "typescript")]
     TypeScript,
     #[value(name = "csharp")]
     CSharp,
@@ -144,6 +145,26 @@ mod tests {
         for lang in [Language::Rust, Language::TypeScript, Language::CSharp] {
             let names: Vec<_> = lang.grammars().iter().map(|(name, _)| *name).collect();
             assert_eq!(names, [lang.name()], "{}", lang.name());
+        }
+    }
+}
+
+#[cfg(test)]
+mod value_enum_tests {
+    use super::Language;
+    use clap::ValueEnum;
+
+    /// The names `--langs` accepts on the command line must be exactly the
+    /// names `Language::name` prints (clap kebab-cases multi-word variants
+    /// by default; `typescript` and `csharp` need explicit pins).
+    #[test]
+    fn cli_value_names_match_language_names() {
+        for lang in Language::value_variants() {
+            let name = clap::ValueEnum::to_possible_value(lang)
+                .unwrap()
+                .get_name()
+                .to_string();
+            assert_eq!(name, lang.name());
         }
     }
 }

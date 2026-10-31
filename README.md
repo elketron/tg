@@ -20,9 +20,9 @@ tg [OPTIONS] [QUERY] [DIR]
 ```
 
 The query is a tree-sitter query (S-expression), given as an argument or read from a file with
-`--file`; exactly one of the two is required, and with `--file` every positional is a directory
+`--file`; at least one of the two is required, and with `--file` every positional is a directory
 (same interface as `rg -f query.scm dir`). `DIR` is the directory to search (default: current
-directory). Supported languages, inferred per file from the extension (case-insensitive): markdown
+directory); exactly one is searched, giving more is an error. Supported languages, inferred per file from the extension (case-insensitive): markdown
 (`.md`), rust (`.rs`), typescript (`.ts`, `.tsx`), csharp (`.cs`). Files of any other extension are
 skipped.
 
@@ -61,13 +61,14 @@ tests/fixtures/tree/main.rs
   1: main
 ```
 
-TypeScript:
+TypeScript (grep output prints each match's *first* capture, first line
+only):
 
 ```console
 $ tg '(lexical_declaration (variable_declarator name: (identifier) @name) @decl)' tests/fixtures/tree
 
 tests/fixtures/tree/app.ts
-  1: const x = 1;
+  1: x = 1
 ```
 
 C#:
@@ -128,8 +129,9 @@ $ tg '(function_item name: (identifier) @name) @fn' --json tests/fixtures/tree
 
 - `0` — success. A query that fails to compile for *some* languages is normal (queries are
   validated per grammar): those languages report their error on stderr and the others run.
-- `1` — no query given (or the `--file` could not be read), or the query compiled against none of
-  the languages that have files here.
+- `1` — a `tg`-level error: no query given (or the `--file` could not be read), more than one
+  directory given, or the query compiled against none of the languages that have files here.
+- `2` — command-line usage errors from clap itself (unknown flag, invalid `--langs` value).
 
 ## Design notes
 

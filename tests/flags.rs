@@ -19,6 +19,7 @@ fn join(lines: &[&str]) -> String {
 /// gitignored and `.hidden.md` is hidden, so by default only visible.md is
 /// walked.
 const WALK: &str = "tests/fixtures/walk";
+const TREE: &str = "tests/fixtures/tree";
 
 fn p(name: &str) -> String {
     format!("{WALK}/{name}")
@@ -38,38 +39,33 @@ fn file_flag_reads_the_query_from_a_scm_file() {
     );
 }
 
-/// With `--file`, a lone positional is the directory (same interface as
-/// ripgrep's `rg -f query.scm dir`), so the query comes from the file and
-/// the walk starts at WALK; nothing else is walked.
+/// Given both a query argument and `--file`, the positional is the
+/// directory (ripgrep semantics): the query comes from the file. One
+/// positional, one directory, so the run walks WALK normally.
 #[test]
-fn file_flag_with_a_dir_walks_only_that_dir() {
-    let out = run(&["--file", "tests/fixtures/walk.scm", WALK]);
+fn query_and_file_together_search_the_positional_as_dir() {
+    let out = run(&["--file", "tests/fixtures/walk.scm", "(paragraph) @p"]);
     assert!(
         out.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        String::from_utf8(out.stdout),
-        Ok(join(&[&p("visible.md"), "  3: Visible paragraph."]))
-    );
+    // The cwd is the crate root; "(paragraph) @p" names no directory, so
+    // the walk finds nothing and stdout stays empty.
+    assert_eq!(String::from_utf8(out.stdout), Ok(String::new()));
 }
 
-/// With `--file`, even a second positional is a directory (ripgrep
-/// semantics): the run walks the fixture through it, not whatever the
-/// stray positional names.
+/// tg searches one directory; with `--file`, every positional is a
+/// directory, so a second one is an error rather than a silent drop.
 #[test]
-fn with_file_positionals_are_all_directories() {
-    let out = run(&["--file", "tests/fixtures/walk.scm", WALK, WALK]);
+fn a_second_directory_positional_is_an_error() {
+    let out = run(&["--file", "tests/fixtures/walk.scm", WALK, TREE]);
+    assert!(!out.status.success());
+    assert_eq!(String::from_utf8(out.stdout), Ok(String::new()));
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    // Both positionals are the same dir, so visible.md appears once per walk.
-    assert_eq!(
-        String::from_utf8(out.stdout),
-        Ok(join(&[&p("visible.md"), "  3: Visible paragraph."]))
+        stderr.contains("search one directory at a time (2 given)"),
+        "expected the two-directories error in:\n{stderr}"
     );
 }
 
@@ -146,5 +142,27 @@ fn hidden_flag_includes_hidden_files() {
             &p("visible.md"),
             "  3: Visible paragraph.",
         ]))
+    );
+}
+
+/// The `--langs` values the README documents must be exactly these
+/// spellings on the command line (`typescript` and `csharp` need explicit
+/// pins; clap kebab-cases multi-word variants by default).
+#[test]
+fn langs_accepts_the_documented_spellings() {
+    let out = run(&[
+        "(paragraph) @p",
+        "--langs",
+        "rust,markdown,typescript,csharp",
+        WALK,
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout),
+        Ok(join(&[&p("visible.md"), "  3: Visible paragraph."]))
     );
 }
