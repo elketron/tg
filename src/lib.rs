@@ -5,6 +5,7 @@
 pub mod lang;
 pub mod report;
 mod shared;
+pub mod template;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -14,9 +15,10 @@ use std::sync::{Arc, Mutex};
 
 use ignore::{WalkBuilder, WalkState};
 use lang::Language;
-use report::{Group, Hit, NamedError, Report};
+use report::{Change, Edit, Group, Hit, NamedError, Report};
 use shared::Shared;
 use streaming_iterator::StreamingIterator;
+use template::{MATCH_CAPTURE, Template};
 
 /// The query compiled once per grammar up front; `tree_sitter::Query` is
 /// `Send + Sync`, so every walker thread can share it. Maps grammar name ->
@@ -48,6 +50,10 @@ pub struct Options {
     pub no_ignore: bool,
     /// Include hidden files and directories when walking.
     pub hidden: bool,
+    /// When set, each match's matched region is replaced by the rendered
+    /// template; the report then carries old/new content per changed file
+    /// instead of match groups.
+    pub template: Option<Template>,
 }
 
 /// Walk `dir` (respecting `opts`: by default gitignore/ignore-file rules on
@@ -62,13 +68,18 @@ pub fn run(dir: &Path, query_src: &str, opts: &Options) -> Report {
         per_language: Mutex::new(HashMap::new()),
         other_skipped: Mutex::new(0),
         parse_errors: Mutex::new(Vec::new()),
+        edits: Mutex::new(Default::default()),
     });
     let langs: Arc<Vec<Language>> = Arc::new(if opts.langs.is_empty() {
         lang::LANGUAGES.to_vec()
     } else {
         opts.langs.clone()
     });
-    let (compiled, compile_errors) = compile(&with_text_capture(query_src), &langs);
+    let query_src = match &opts.template {
+        Some(_) => Cow::Owned(append_capture(query_src, MATCH_CAPTURE)),
+        None => with_text_capture(query_src),
+    };
+    let (compiled, compile_errors) = compile(&query_src, &langs);
     let mut builder = WalkBuilder::new(dir);
     builder.hidden(!opts.hidden);
     if opts.no_ignore {
@@ -79,13 +90,15 @@ pub fn run(dir: &Path, query_src: &str, opts: &Options) -> Report {
             .git_global(false)
             .git_exclude(false);
     }
-    let (sh, cp, cl) = (
+    let (sh, cp, cl, tp) = (
         Arc::clone(&shared),
         Arc::clone(&compiled),
         Arc::clone(&langs),
+        opts.template.clone(),
     );
     builder.build_parallel().run(move || {
         let (shared, compiled, langs) = (Arc::clone(&sh), Arc::clone(&cp), Arc::clone(&cl));
+        let template = tp.clone();
         let mut parsers: Parsers = HashMap::new();
         let mut cursor = tree_sitter::QueryCursor::new();
         Box::new(move |result| {
@@ -112,13 +125,18 @@ pub fn run(dir: &Path, query_src: &str, opts: &Options) -> Report {
                 &compiled,
                 &mut parsers,
                 &mut cursor,
+                template.as_ref(),
             );
             WalkState::Continue
         })
     });
     // Read the tallies through the locks rather than unwrapping the Arcs:
     // the visitor closures holding clones may outlive the walk's loop.
-    assemble(&shared, &compiled, &compile_errors)
+    let mut report = assemble(&shared, &compiled, &compile_errors);
+    if let Some(template) = &opts.template {
+        finalize_rewrites(&shared, template, &compiled, &mut report);
+    }
+    report
 }
 
 /// Tree-sitter reports matches for capture-less patterns with an empty
@@ -131,14 +149,36 @@ pub fn run(dir: &Path, query_src: &str, opts: &Options) -> Report {
 /// top-level `)` (invalid query, reported by the compiler) does not end a
 /// pattern.
 fn with_text_capture(query_src: &str) -> Cow<'_, str> {
-    let mut out = String::with_capacity(query_src.len() + 6);
+    let (names, ends) = scan_query(query_src);
+    if !names.is_empty() || ends.is_empty() {
+        return Cow::Borrowed(query_src);
+    }
+    Cow::Owned(insert_captures(query_src, &ends, "text"))
+}
+
+/// Append ` @name` after every top-level pattern unconditionally (the -r
+/// path: even a query that already has captures needs the whole matched
+/// node reachable, so every pattern gets the internal match capture too).
+fn append_capture(query_src: &str, name: &str) -> String {
+    let ends = scan_query(query_src).1;
+    insert_captures(query_src, &ends, name)
+}
+
+/// Scan a query text for its real capture names and the end offsets of its
+/// top-level patterns (the byte offset just past each closing top-level
+/// `)`); a `@` or paren inside a string or `;` comment does not count, and
+/// a stray top-level `)` (invalid query, reported by the compiler) does
+/// not open a pattern.
+fn scan_query(query_src: &str) -> (Vec<String>, Vec<usize>) {
+    let mut names: Vec<String> = Vec::new();
+    let mut ends: Vec<usize> = Vec::new();
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
     let mut in_comment = false;
-    let mut rewritten = false;
-    for c in query_src.chars() {
-        out.push(c);
+    let mut in_name = false;
+    let mut name = String::new();
+    for (offset, c) in query_src.char_indices() {
         if in_comment {
             in_comment = c != '\n';
             continue;
@@ -153,26 +193,47 @@ fn with_text_capture(query_src: &str) -> Cow<'_, str> {
             }
             continue;
         }
+        if in_name {
+            if c.is_alphanumeric() || c == '_' {
+                name.push(c);
+                continue;
+            }
+            in_name = false;
+            names.push(std::mem::take(&mut name));
+        }
         match c {
-            '@' => return Cow::Borrowed(query_src),
+            '@' => in_name = true,
             '"' => in_string = true,
             ';' => in_comment = true,
             '(' => depth += 1,
             ')' if depth > 0 => {
                 depth -= 1;
                 if depth == 0 {
-                    out.push_str(" @text");
-                    rewritten = true;
+                    ends.push(offset + c.len_utf8());
                 }
             }
             _ => {}
         }
     }
-    if rewritten {
-        Cow::Owned(out)
-    } else {
-        Cow::Borrowed(query_src)
+    if in_name {
+        names.push(name);
     }
+    (names, ends)
+}
+
+/// Insert ` @name` at each of the given offsets (ascending, as produced
+/// by `scan_query`).
+fn insert_captures(query_src: &str, ends: &[usize], name: &str) -> String {
+    let mut out = String::with_capacity(query_src.len() + ends.len() * (name.len() + 2));
+    let mut prev = 0;
+    for &end in ends {
+        out.push_str(&query_src[prev..end]);
+        out.push_str(" @");
+        out.push_str(name);
+        prev = end;
+    }
+    out.push_str(&query_src[prev..]);
+    out
 }
 
 fn compile(query_src: &str, langs: &[Language]) -> (Arc<Compiled>, CompileErrors) {
@@ -204,6 +265,7 @@ fn process_file(
     compiled: &Compiled,
     parsers: &mut Parsers,
     cursor: &mut tree_sitter::QueryCursor,
+    template: Option<&Template>,
 ) {
     let Ok(bytes) = fs::read(path) else {
         report_failure(shared, language, path);
@@ -223,7 +285,7 @@ fn process_file(
             continue;
         };
         if let Some(query) = compiled.get(name) {
-            run_matches(cursor, query, &tree, &bytes, path, shared);
+            run_matches(cursor, query, &tree, &bytes, path, shared, template);
         }
     }
     if ok {
@@ -254,12 +316,15 @@ fn run_matches(
     bytes: &[u8],
     path: &Path,
     shared: &Shared,
+    template: Option<&Template>,
 ) {
     let mut matches = cursor.matches(query, tree.root_node(), bytes);
     let mut found = Vec::new();
+    let mut edits: Vec<Edit> = Vec::new();
     while let Some(m) = matches.next() {
         let mut captures: Vec<(String, String)> = Vec::new();
         let mut line = 0;
+        let mut region: Option<(usize, usize)> = None;
         for c in m.captures() {
             let Ok(text) = c.node.utf8_text(bytes) else {
                 continue;
@@ -267,19 +332,54 @@ fn run_matches(
             if captures.is_empty() {
                 line = c.node.start_position().row + 1;
             }
-            let name = query.capture_names()[c.index as usize].to_string();
-            captures.push((name, text.to_string()));
+            let name = &query.capture_names()[c.index as usize];
+            if template.is_some() && name == &MATCH_CAPTURE {
+                region = Some((c.node.start_byte(), c.node.end_byte()));
+            }
+            captures.push((name.to_string(), text.to_string()));
         }
         if captures.is_empty() {
             continue;
         }
-        found.push(Hit { line, captures });
+        match template {
+            None => found.push(Hit { line, captures }),
+            Some(template) => edits.extend(render_edit(template, &captures, region)),
+        }
     }
     if !found.is_empty() {
         let mut guard = shared.groups.lock().unwrap();
         let hits = guard.entry(path.to_path_buf()).or_default();
         hits.extend(found);
     }
+    if !edits.is_empty() {
+        let mut guard = shared.edits.lock().unwrap();
+        let entry = guard
+            .entry(path.to_path_buf())
+            .or_insert_with(|| (bytes.to_vec(), Default::default()));
+        entry.1.extend(edits);
+    }
+}
+
+/// One match's edit: the rendered template for its matched region. A
+/// missing region cannot happen in a rewriting run (every top-level
+/// pattern got the match capture), so it yields no edit.
+fn render_edit(
+    template: &Template,
+    captures: &[(String, String)],
+    region: Option<(usize, usize)>,
+) -> Option<Edit> {
+    let (start, end) = region?;
+    let lookup = |name: &str| {
+        captures
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, text)| text.clone())
+    };
+    Some(Edit {
+        start,
+        end,
+        replacement: template.render(lookup),
+    })
 }
 
 fn tally(shared: &Shared, language: Language, ok: bool) {
@@ -295,6 +395,101 @@ fn tally(shared: &Shared, language: Language, ok: bool) {
 fn report_failure(shared: &Shared, language: Language, path: &Path) {
     tally(shared, language, false);
     shared.parse_errors.lock().unwrap().push(path.to_path_buf());
+}
+
+/// Check the template's placeholders against the queries actually run
+/// (languages without candidate files cannot fail the run), then rebuild
+/// each matched file's content. A file whose match regions overlap (two
+/// patterns nested, or markdown's two grammars disagreeing) is skipped
+/// rather than guessed at. A template error fails the whole run: no file
+/// changes and nothing is written. Files whose replacements change nothing
+/// are left out of the report.
+fn finalize_rewrites(
+    shared: &Shared,
+    template: &Template,
+    compiled: &Compiled,
+    report: &mut Report,
+) {
+    let references = template.references();
+    if !references.is_empty() {
+        let mut seen: Vec<Language> = report.per_language.keys().copied().collect();
+        seen.sort();
+        for language in &seen {
+            let names: Vec<&str> = language
+                .grammars()
+                .iter()
+                .filter_map(|(grammar, _)| compiled.get(*grammar))
+                .flat_map(|q| q.capture_names().iter().copied())
+                .map(|n| n as &str)
+                .collect();
+            // A language whose query could not compile never ran and can
+            // never match; its compile error is reported instead, not a
+            // template error about captures it cannot have.
+            if names.is_empty() {
+                continue;
+            }
+            for name in &references {
+                if !names.contains(&name.as_str()) {
+                    report.template_errors.push(format!(
+                        "template: placeholder %{name} is not defined by the query running \
+                         on {}; add the capture to the query or drop the placeholder",
+                        language.name()
+                    ));
+                }
+            }
+        }
+        report.template_errors.sort();
+        if !report.template_errors.is_empty() {
+            return;
+        }
+    }
+    let edits = shared.edits.lock().unwrap();
+    for (path, (bytes, set)) in edits.iter() {
+        let edits: Vec<Edit> = set.iter().cloned().collect();
+        // Sorted by range; an overlap always shows between neighbours.
+        if let Some(pair) = overlapping_pair(&edits) {
+            report.skips.push(NamedError {
+                name: path.display().to_string(),
+                error: format!(
+                    "skipped: match regions {}..{} and {}..{} overlap; \
+                     the query must match disjoint regions for -r",
+                    pair[0].start, pair[0].end, pair[1].start, pair[1].end
+                ),
+            });
+            continue;
+        }
+        let Ok(old) = std::str::from_utf8(bytes) else {
+            report.skips.push(NamedError {
+                name: path.display().to_string(),
+                error: "skipped: file is not valid UTF-8 and cannot be rewritten".to_string(),
+            });
+            continue;
+        };
+        let new = apply_edits(old, &edits);
+        if new != old {
+            report.changes.push(Change {
+                path: path.clone(),
+                old: old.to_string(),
+                new,
+            });
+        }
+    }
+}
+
+fn overlapping_pair(edits: &[Edit]) -> Option<&[Edit]> {
+    edits.windows(2).find(|pair| pair[1].start < pair[0].end)
+}
+
+fn apply_edits(old: &str, edits: &[Edit]) -> String {
+    let mut out = String::with_capacity(old.len());
+    let mut pos = 0;
+    for edit in edits {
+        out.push_str(&old[pos..edit.start]);
+        out.push_str(&edit.replacement);
+        pos = edit.end;
+    }
+    out.push_str(&old[pos..]);
+    out
 }
 
 /// Turn the shared accumulators into the report. Query-compile errors are
@@ -327,6 +522,9 @@ fn assemble(shared: &Shared, compiled: &Compiled, errors: &CompileErrors) -> Rep
     query_errors.sort_by(|a, b| a.name.cmp(&b.name));
     let fatal = !seen.is_empty() && query_errors.len() == seen.len();
     Report {
+        changes: Vec::new(),
+        skips: Vec::new(),
+        template_errors: Vec::new(),
         groups: shared
             .groups
             .lock()
@@ -352,7 +550,20 @@ fn assemble(shared: &Shared, compiled: &Compiled, errors: &CompileErrors) -> Rep
 
 #[cfg(test)]
 mod tests {
-    use super::with_text_capture;
+    use super::{append_capture, with_text_capture};
+
+    #[test]
+    fn append_capture_adds_it_to_every_top_level_pattern() {
+        // The -r path appends even when the query already has captures.
+        assert_eq!(append_capture("(a) @x", "match"), "(a) @match @x");
+        // A paren inside a string does not end the pattern early.
+        assert_eq!(append_capture("(a \"b\")", "match"), "(a \"b\") @match");
+        assert_eq!(
+            append_capture("foo)", "match"),
+            "foo)",
+            "stray paren: no pattern"
+        );
+    }
 
     #[test]
     fn a_real_capture_skips_the_rewrite() {

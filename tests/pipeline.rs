@@ -27,6 +27,9 @@ fn fixture_tree_parse_counts() {
         report,
         Report {
             groups: Vec::new(),
+            changes: Vec::new(),
+            skips: Vec::new(),
+            template_errors: Vec::new(),
             query_errors: Vec::new(),
             parse_errors: Vec::new(),
             per_language: want,

@@ -33,6 +33,8 @@ skipped.
 | `--no-ignore` | do not respect ignore files (`.gitignore`, `.ignore`, ...) when walking |
 | `--hidden` | include hidden files and directories |
 | `--json` | print one JSON object per match, one per line (NDJSON); see [JSON output](#json-output) |
+| `-r, --replace` <TEMPLATE> | replace every matched region with the rendered template; see [Rewriting](#rewriting--r) |
+| `--write` | with `-r`: rewrite the files in place instead of only printing the diff (does nothing without it) |
 
 File walking follows ripgrep's rules via the `ignore` crate: ignore files respected, hidden files
 skipped, both opt-out-able with the flags above.
@@ -100,6 +102,49 @@ tests/fixtures/walk/visible.md
   3: Visible paragraph.
 ```
 
+## Rewriting (`-r`)
+
+`-r <TEMPLATE>` replaces every region the query matches with the rendered template:
+`%name` expands to the text of capture `@name`, `%match` to the whole matched node's
+text, and other text is literal. A query without captures replaces whole matched nodes,
+so a template of plain text is then equivalent to `%match`. Any placeholder the query
+does not define is an error: the run reports it and writes nothing.
+
+Dry run by default: without `--write` the changes are printed as a unified diff per
+changed file on stdout and no file is touched; with `--write` the files are rewritten in
+place and the diffs go to stderr instead. A file whose match regions overlap (one pattern
+matching inside another) is skipped with an error rather than guessed at, and a file whose
+tree fails to parse is skipped by the usual parse-failure report (in markdown the split block/inline grammars each report the same node with slightly different spans, so a query both grammars understand lands on overlapping regions and the file is skipped). `-r` composes with
+`--file`, `--langs`, `--no-ignore` and `--hidden`; with `--json` the JSON output is
+suppressed and the diff/writes happen instead.
+
+Every match replaces its own region, so a rename through a capture works (these runs are
+the dry run, so they change nothing):
+
+```console
+$ tg '(function_item name: (identifier) @name) @fn' -r '// TODO(%name)' tests/fixtures/tree
+--- tests/fixtures/tree/main.rs
++++ tests/fixtures/tree/main.rs
+@@ -1 +1 @@
+-fn main() {}
++// TODO(main)
+```
+
+The same rewrite written straight into the file: add `--write` (the diff then goes to
+stderr instead — run it against a copy). A capture-less query with a plain-text template
+replaces whole nodes:
+
+```console
+$ tg '(paragraph)' -r 'Comment: %match' tests/fixtures/walk
+--- tests/fixtures/walk/visible.md
++++ tests/fixtures/walk/visible.md
+@@ -1,3 +1,3 @@
+ # Walk fixture
+ 
+-Visible paragraph.
++Comment: Visible paragraph.
+```
+
 ## Output
 
 Default (grep-style): matches go to stdout, grouped by file (paths printed as given, files sorted),
@@ -131,6 +176,9 @@ $ tg '(function_item name: (identifier) @name) @fn' --json tests/fixtures/tree
   validated per grammar): those languages report their error on stderr and the others run.
 - `1` — a `tg`-level error: no query given (or the `--file` could not be read), more than one
   directory given, or the query compiled against none of the languages that have files here.
+  An `-r` run also exits 1 when the template references a capture the query does
+  not define or when it skipped a file (overlapping match regions); `--write` without
+  `-r` is an error too.
 - `2` — command-line usage errors from clap itself (unknown flag, invalid `--langs` value).
 
 ## Design notes
