@@ -20,7 +20,7 @@ pub struct Counts {
 
 /// Parse counts per language, plus one skipped total for extensions with no
 /// grammar.
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Default, Debug, PartialEq, Eq, Clone)]
 pub struct Report {
     pub per_language: HashMap<Language, Counts>,
     pub other_skipped: usize,
@@ -28,6 +28,9 @@ pub struct Report {
 
 /// Walk `dir` (gitignore/ignore-file rules and hidden-file rules on, matching
 /// ripgrep's defaults) and parse every candidate file with its grammar.
+/// A file counts as failed when reading it fails or its grammar cannot be
+/// set; unparseable content itself does not — tree-sitter reports an
+/// ERROR-tree root instead.
 pub fn run(dir: &Path) -> Report {
     let per_language: Arc<Mutex<HashMap<Language, Counts>>> = Arc::new(Mutex::new(HashMap::new()));
     let other_skipped: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
@@ -68,11 +71,10 @@ pub fn run(dir: &Path) -> Report {
             WalkState::Continue
         })
     });
-    let per_language = Arc::try_unwrap(per_language).unwrap().into_inner().unwrap();
-    let other_skipped = Arc::try_unwrap(other_skipped)
-        .unwrap()
-        .into_inner()
-        .unwrap();
+    // Read the tallies through the locks rather than unwrapping the Arcs:
+    // the visitor closures holding clones may outlive the walk's loop.
+    let per_language = per_language.lock().unwrap().clone();
+    let other_skipped = *other_skipped.lock().unwrap();
     Report {
         per_language,
         other_skipped,

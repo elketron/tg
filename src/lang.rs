@@ -40,10 +40,16 @@ impl Language {
     }
 }
 
-/// Map a file path to its language by extension. Unknown extensions have no
-/// language and are skipped.
+/// Map a file path to its language by extension, case-insensitively (like
+/// ripgrep's ignore matching). Unknown extensions have no language and are
+/// skipped.
 pub fn language_for(path: &Path) -> Option<Language> {
-    match path.extension().and_then(|e| e.to_str()) {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("md") => Some(Language::Markdown),
         Some("rs") => Some(Language::Rust),
         Some("ts") | Some("tsx") => Some(Language::TypeScript),
@@ -64,6 +70,18 @@ mod tests {
             ("a/b/c.ts", Some(Language::TypeScript)),
             ("a/b/c.tsx", Some(Language::TypeScript)),
             ("x/y/Program.cs", Some(Language::CSharp)),
+        ] {
+            assert_eq!(language_for(Path::new(name)), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn extensions_match_case_insensitively() {
+        for (name, want) in [
+            ("README.MD", Some(Language::Markdown)),
+            ("src/MAIN.Rs", Some(Language::Rust)),
+            ("a/b/c.TSX", Some(Language::TypeScript)),
+            ("x/y/Program.CS", Some(Language::CSharp)),
         ] {
             assert_eq!(language_for(Path::new(name)), want, "{name}");
         }
