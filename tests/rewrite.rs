@@ -278,8 +278,37 @@ fn json_with_replace_still_diffs_and_write_alone_is_an_error() {
     assert!(!out.status.success());
     assert_eq!(stdout(&out), String::new());
     assert!(
-        stderr(&out).contains("--write does nothing without -r"),
+        stderr(&out).contains("--write without -r is an error"),
         "{}",
         stderr(&out)
     );
+}
+
+/// Finding 2 from review 0090: multi-byte content and a non-ASCII
+/// replacement through the byte-range rewrite, asserted exactly (the byte
+/// ranges are computed on the original UTF-8 bytes and applied in one pass).
+#[test]
+fn multibyte_content_and_replacement_survive_the_rewrite() {
+    let dir = fixture_dir("utf8");
+    std::fs::write(dir.join("u.md"), "café crème.\n\nnaïve café.\n").unwrap();
+    let path = dir.join("u.md").display().to_string();
+    let out = run(&[
+        "(paragraph)",
+        "-r",
+        "«%match»",
+        "--write",
+        &dir.display().to_string(),
+    ]);
+    ok(&out);
+    assert!(
+        stderr(&out).contains(&diff(
+            &path,
+            "@@ -1,3 +1,4 @@\n-café crème.\n-\n-naïve café.\n+«café crème.\n+»\n+«naïve café.\n+»\n\\ No newline at end of file\n"
+        )),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(read(&dir, "u.md"), "«café crème.\n»\n«naïve café.\n»");
+    // The fixture's ASCII file matches too and is rewritten the same way.
+    assert_eq!(read(&dir, "b.md"), "«hello world.\n»\n«second para.\n»");
 }

@@ -98,7 +98,7 @@ fn main() -> ExitCode {
         }
     };
     if args.write && template.is_none() {
-        eprintln!("tg: --write does nothing without -r; without -r the run only prints matches");
+        eprintln!("tg: --write without -r is an error; without -r the run only prints matches");
         return ExitCode::FAILURE;
     }
     let opts = Options {

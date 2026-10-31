@@ -34,7 +34,7 @@ skipped.
 | `--hidden` | include hidden files and directories |
 | `--json` | print one JSON object per match, one per line (NDJSON); see [JSON output](#json-output) |
 | `-r, --replace` <TEMPLATE> | replace every matched region with the rendered template; see [Rewriting](#rewriting--r) |
-| `--write` | with `-r`: rewrite the files in place instead of only printing the diff (does nothing without it) |
+| `--write` | with `-r`: rewrite the files in place instead of only printing the diff; an error without `-r` |
 
 File walking follows ripgrep's rules via the `ignore` crate: ignore files respected, hidden files
 skipped, both opt-out-able with the flags above.
@@ -108,7 +108,7 @@ tests/fixtures/walk/visible.md
 `%name` expands to the text of capture `@name`, `%match` to the whole matched node's
 text, and other text is literal. A query without captures replaces whole matched nodes,
 so a template of plain text is then equivalent to `%match`. Any placeholder the query
-does not define is an error: the run reports it and writes nothing.
+does not define is an error: the run reports it and writes nothing. A `%` must always be followed by a capture name (there is no escape for a literal `%`), and a capture name that appears twice in the query resolves to its first occurrence.
 
 Dry run by default: without `--write` the changes are printed as a unified diff per
 changed file on stdout and no file is touched; with `--write` the files are rewritten in
@@ -116,7 +116,8 @@ place and the diffs go to stderr instead. A file whose match regions overlap (on
 matching inside another) is skipped with an error rather than guessed at, and a file whose
 tree fails to parse is skipped by the usual parse-failure report (in markdown the split block/inline grammars each report the same node with slightly different spans, so a query both grammars understand lands on overlapping regions and the file is skipped). `-r` composes with
 `--file`, `--langs`, `--no-ignore` and `--hidden`; with `--json` the JSON output is
-suppressed and the diff/writes happen instead.
+suppressed and the diff/writes happen instead. Writes go file by file with no rollback: a write that fails
+stops the run with an error (exit 1) and the files already rewritten stay rewritten.
 
 Every match replaces its own region, so a rename through a capture works (these runs are
 the dry run, so they change nothing):
