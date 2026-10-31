@@ -1,0 +1,13 @@
+[package]
+name = "tg"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+ignore = "0.4.34"
+tree-sitter = "0.27.1"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-md = { version = "0.5.4", features = ["parser"] }
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
