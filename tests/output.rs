@@ -115,7 +115,9 @@ fn csharp_query_prints_grouped_matches() {
 /// so both run over each markdown file; the block grammar sees the heading's
 /// inline and the paragraphs, the inline grammar re-reports the whole file as
 /// one inline node. The exact output pins the union: hits from the two
-/// grammars dedupe and sort by line then text.
+/// grammars dedupe only on the full capture text, so on note.md the two
+/// grammars' texts (which differ in the trailing newline) each print; hits
+/// sort by line then text.
 #[test]
 fn markdown_dual_grammar_union_is_deduped_and_sorted() {
     let out = run("(inline) @i");
@@ -134,6 +136,7 @@ fn markdown_dual_grammar_union_is_deduped_and_sorted() {
             "  5: Second paragraph.",
             "",
             "sub/note.md",
+            "  1: second note",
             "  1: second note",
         ]))
     );

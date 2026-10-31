@@ -13,13 +13,14 @@ pub struct Counts {
     pub failed: usize,
 }
 
-/// One match: 1-based line of the first captured node, and that node's
-/// first line. Ordered by line, then text, so hits from two grammars of
-/// the same file (markdown) dedupe and sort deterministically.
+/// One match: 1-based line of the first captured node, and every capture
+/// as (name, captured text) in capture order. Ordered by line, then
+/// captures, so hits from two grammars of the same file (markdown)
+/// dedupe and sort deterministically.
 #[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord)]
 pub struct Hit {
     pub line: usize,
-    pub text: String,
+    pub captures: Vec<(String, String)>,
 }
 
 /// A file with at least one hit, and its hits sorted by line.

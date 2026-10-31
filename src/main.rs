@@ -12,17 +12,23 @@ use tg::report::Report;
     about = "ripgrep-style search where the pattern is a tree-sitter query"
 )]
 struct Args {
-    /// The tree-sitter query (S-expression, with at least one capture).
+    /// The tree-sitter query (S-expression). With `--json`, named captures
+    /// define the output fields.
     query: String,
     /// Directory to search.
     #[arg(default_value = ".")]
     dir: PathBuf,
+    /// Print one JSON object per match, one per line (NDJSON): `file`,
+    /// `line`, and each named capture as a field. A query with no captures
+    /// reports the matched node's text as `text`.
+    #[arg(long)]
+    json: bool,
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
     let report = tg::run(&args.dir, &args.query);
-    print(&report);
+    print(&report, args.json);
     if report.fatal {
         eprintln!(
             "tg: the query compiled against none of the languages with files here; \
@@ -33,11 +39,12 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Matches go to stdout (the tool's interface): grouped by file, each hit
-/// indented with its line number and the node's first line, a blank line
-/// between files. Everything else — query and parse errors, and the
-/// per-language parse counts — goes to stderr.
-fn print(report: &Report) {
+/// Matches go to stdout (the tool's interface): with `--json`, one NDJSON
+/// line per match (`file`, `line`, each named capture); otherwise grouped
+/// by file, each hit indented with its line number and the node's first
+/// line, a blank line between files. Everything else — query and parse
+/// errors, and the per-language parse counts — goes to stderr.
+fn print(report: &Report, json: bool) {
     for error in &report.query_errors {
         eprintln!("tg: {}: query error: {}", error.name, error.error);
     }
@@ -46,13 +53,37 @@ fn print(report: &Report) {
     }
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
-    for (i, group) in report.groups.iter().enumerate() {
-        if i > 0 {
-            let _ = writeln!(stdout);
+    if json {
+        for group in &report.groups {
+            for hit in &group.hits {
+                let mut obj = serde_json::Map::new();
+                obj.insert("file".into(), group.path.display().to_string().into());
+                obj.insert("line".into(), (hit.line as u64).into());
+                for (name, text) in &hit.captures {
+                    obj.insert(name.clone(), text.clone().into());
+                }
+                if let Ok(line) = serde_json::to_string(&obj) {
+                    let _ = writeln!(stdout, "{line}");
+                }
+            }
         }
-        let _ = writeln!(stdout, "{}", group.path.display());
-        for hit in &group.hits {
-            let _ = writeln!(stdout, "  {}: {}", hit.line, hit.text);
+    } else {
+        for (i, group) in report.groups.iter().enumerate() {
+            if i > 0 {
+                let _ = writeln!(stdout);
+            }
+            let _ = writeln!(stdout, "{}", group.path.display());
+            for hit in &group.hits {
+                let Some((_, text)) = hit.captures.first() else {
+                    continue;
+                };
+                let _ = writeln!(
+                    stdout,
+                    "  {}: {}",
+                    hit.line,
+                    text.lines().next().unwrap_or_default()
+                );
+            }
         }
     }
     for &language in &lang::LANGUAGES {

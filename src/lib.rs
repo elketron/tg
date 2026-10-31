@@ -6,6 +6,7 @@ pub mod lang;
 pub mod report;
 mod shared;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
@@ -45,7 +46,7 @@ pub fn run(dir: &Path, query_src: &str) -> Report {
         other_skipped: Mutex::new(0),
         parse_errors: Mutex::new(Vec::new()),
     });
-    let (compiled, compile_errors) = compile(query_src);
+    let (compiled, compile_errors) = compile(&with_text_capture(query_src));
     let (sh, cp) = (Arc::clone(&shared), Arc::clone(&compiled));
     WalkBuilder::new(dir).build_parallel().run(move || {
         let (shared, compiled) = (Arc::clone(&sh), Arc::clone(&cp));
@@ -78,6 +79,52 @@ pub fn run(dir: &Path, query_src: &str) -> Report {
     // Read the tallies through the locks rather than unwrapping the Arcs:
     // the visitor closures holding clones may outlive the walk's loop.
     assemble(&shared, &compiled, &compile_errors)
+}
+
+/// Tree-sitter reports matches for capture-less patterns with an empty
+/// capture list and no accessor for the matched node, so such a query
+/// could print nothing. When the query has no captures at all, append
+/// ` @text` after every top-level pattern so the matched node's text
+/// lands in the JSON output's `text` field (and the grep-style output's
+/// text slot). Strings and `;` comments are respected so their parens
+/// don't count as nesting.
+fn with_text_capture(query_src: &str) -> Cow<'_, str> {
+    if query_src.contains('@') {
+        return Cow::Borrowed(query_src);
+    }
+    let mut out = String::with_capacity(query_src.len() + 6);
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    for c in query_src.chars() {
+        out.push(c);
+        if in_comment {
+            in_comment = c != '\n';
+        } else if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else {
+            match c {
+                '"' => in_string = true,
+                ';' => in_comment = true,
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push_str(" @text");
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Cow::Owned(out)
 }
 
 fn compile(query_src: &str) -> (Arc<Compiled>, CompileErrors) {
@@ -163,19 +210,22 @@ fn run_matches(
     let mut matches = cursor.matches(query, tree.root_node(), bytes);
     let mut found = Vec::new();
     while let Some(m) = matches.next() {
-        let Some(c) = m.captures().first() else {
+        let mut captures: Vec<(String, String)> = Vec::new();
+        let mut line = 0;
+        for c in m.captures() {
+            let Ok(text) = c.node.utf8_text(bytes) else {
+                continue;
+            };
+            if captures.is_empty() {
+                line = c.node.start_position().row + 1;
+            }
+            let name = query.capture_names()[c.index as usize].to_string();
+            captures.push((name, text.to_string()));
+        }
+        if captures.is_empty() {
             continue;
-        };
-        let Ok(text) = c.node.utf8_text(bytes) else {
-            continue;
-        };
-        let Some(first_line) = text.lines().next() else {
-            continue;
-        };
-        found.push(Hit {
-            line: c.node.start_position().row + 1,
-            text: first_line.to_string(),
-        });
+        }
+        found.push(Hit { line, captures });
     }
     if !found.is_empty() {
         let mut guard = shared.groups.lock().unwrap();
