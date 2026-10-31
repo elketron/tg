@@ -86,22 +86,24 @@ pub fn run(dir: &Path, query_src: &str) -> Report {
 /// could print nothing. When the query has no captures at all, append
 /// ` @text` after every top-level pattern so the matched node's text
 /// lands in the JSON output's `text` field (and the grep-style output's
-/// text slot). Strings and `;` comments are respected so their parens
-/// don't count as nesting.
+/// text slot). A `@` only counts as a real capture outside strings and `;`
+/// comments, and so do the parens that decide pattern ends; a stray
+/// top-level `)` (invalid query, reported by the compiler) does not end a
+/// pattern.
 fn with_text_capture(query_src: &str) -> Cow<'_, str> {
-    if query_src.contains('@') {
-        return Cow::Borrowed(query_src);
-    }
     let mut out = String::with_capacity(query_src.len() + 6);
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
     let mut in_comment = false;
+    let mut rewritten = false;
     for c in query_src.chars() {
         out.push(c);
         if in_comment {
             in_comment = c != '\n';
-        } else if in_string {
+            continue;
+        }
+        if in_string {
             if escaped {
                 escaped = false;
             } else if c == '\\' {
@@ -109,22 +111,28 @@ fn with_text_capture(query_src: &str) -> Cow<'_, str> {
             } else if c == '"' {
                 in_string = false;
             }
-        } else {
-            match c {
-                '"' => in_string = true,
-                ';' => in_comment = true,
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        out.push_str(" @text");
-                    }
+            continue;
+        }
+        match c {
+            '@' => return Cow::Borrowed(query_src),
+            '"' => in_string = true,
+            ';' => in_comment = true,
+            '(' => depth += 1,
+            ')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push_str(" @text");
+                    rewritten = true;
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
-    Cow::Owned(out)
+    if rewritten {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(query_src)
+    }
 }
 
 fn compile(query_src: &str) -> (Arc<Compiled>, CompileErrors) {
@@ -299,5 +307,54 @@ fn assemble(shared: &Shared, compiled: &Compiled, errors: &CompileErrors) -> Rep
         per_language: shared.per_language.lock().unwrap().clone(),
         other_skipped: *shared.other_skipped.lock().unwrap(),
         fatal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_text_capture;
+
+    #[test]
+    fn a_real_capture_skips_the_rewrite() {
+        assert_eq!(with_text_capture("(paragraph) @p"), "(paragraph) @p");
+    }
+
+    #[test]
+    fn capture_less_queries_get_a_text_capture_per_top_level_pattern() {
+        assert_eq!(with_text_capture("(paragraph)"), "(paragraph) @text");
+        assert_eq!(
+            with_text_capture("(a)\n(b)"),
+            "(a) @text\n(b) @text",
+            "every top-level pattern gets its own text capture"
+        );
+        assert_eq!(
+            with_text_capture("((a) (b))"),
+            "((a) (b)) @text",
+            "nested parens do not end the pattern"
+        );
+    }
+
+    #[test]
+    fn strings_and_comments_do_not_hide_or_fake_captures_and_parens() {
+        // A paren inside a string does not close the pattern early.
+        assert_eq!(with_text_capture("(eq \"a)b\")"), "(eq \"a)b\") @text");
+        // An @ inside a comment is not a real capture: the rewrite runs.
+        assert_eq!(
+            with_text_capture("(paragraph) ; see @x"),
+            "(paragraph) @text ; see @x"
+        );
+        // A paren inside a comment does not close a pattern.
+        assert_eq!(
+            with_text_capture("(foo) ; )\n(b)"),
+            "(foo) @text ; )\n(b) @text"
+        );
+    }
+
+    #[test]
+    fn a_stray_top_level_paren_does_not_panic_the_rewriter() {
+        // Invalid query (the compiler reports it); the rewriter must leave
+        // it alone rather than underflow its depth counter.
+        assert_eq!(with_text_capture("foo)"), "foo)");
+        assert_eq!(with_text_capture("a) b)"), "a) b)");
     }
 }

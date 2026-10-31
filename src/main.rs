@@ -20,7 +20,9 @@ struct Args {
     dir: PathBuf,
     /// Print one JSON object per match, one per line (NDJSON): `file`,
     /// `line`, and each named capture as a field. A query with no captures
-    /// reports the matched node's text as `text`.
+    /// reports the matched node's text as `text`. `file` and `line` always
+    /// keep their contract values: a capture named `file` or `line` is
+    /// overridden by them.
     #[arg(long)]
     json: bool,
 }
@@ -57,11 +59,12 @@ fn print(report: &Report, json: bool) {
         for group in &report.groups {
             for hit in &group.hits {
                 let mut obj = serde_json::Map::new();
-                obj.insert("file".into(), group.path.display().to_string().into());
-                obj.insert("line".into(), (hit.line as u64).into());
                 for (name, text) in &hit.captures {
                     obj.insert(name.clone(), text.clone().into());
                 }
+                // Inserted last so the contract fields win a name clash.
+                obj.insert("file".into(), group.path.display().to_string().into());
+                obj.insert("line".into(), (hit.line as u64).into());
                 if let Ok(line) = serde_json::to_string(&obj) {
                     let _ = writeln!(stdout, "{line}");
                 }

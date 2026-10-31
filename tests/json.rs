@@ -108,13 +108,14 @@ fn json_without_captures_reports_node_text() {
     );
 }
 
-/// The same query without `--json` still prints the grep-style grouped
-/// output (the rewriter only ensures matches exist; stdout shape is the
-/// old one). `(paragraph)` compiles in markdown's block grammar only, so
-/// nothing double-reports here — unlike the `(inline)` case in
-/// tests/output.rs.
+/// The grep-style shape is unchanged for capture-bearing queries; for
+/// capture-LESS ones this is new behavior: on master such queries printed
+/// nothing (matches have no captures to report), and the ` @text` rewrite
+/// makes them print now. `(paragraph)` compiles in markdown's block
+/// grammar only, so nothing double-reports here — unlike the `(inline)`
+/// case in tests/output.rs.
 #[test]
-fn no_capture_query_keeps_grep_style_output() {
+fn no_capture_query_prints_grep_style_matches() {
     let out = run("(paragraph)", false);
     ok(&out);
     let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
@@ -126,4 +127,36 @@ fn no_capture_query_keeps_grep_style_output() {
             q = p("sub/note.md")
         )
     );
+}
+/// `file` and `line` are contract fields: a capture stealing either name
+/// is overridden by them (inserted last in main's JSON print), so the
+/// capture's own value is lost — documented in `--help`.
+#[test]
+fn capture_named_file_or_line_loses_to_the_contract_fields() {
+    let out = run("(paragraph) @file", true);
+    ok(&out);
+    assert_eq!(
+        ndjson(&out),
+        vec![
+            serde_json::json!({"file": p("README.md"), "line": 3}),
+            serde_json::json!({"file": p("README.md"), "line": 5}),
+            serde_json::json!({"file": p("sub/note.md"), "line": 1}),
+        ]
+    );
+}
+
+/// A stray top-level `)` is invalid for every grammar; the rewriter must
+/// not panic on it (debug builds used to overflow the depth counter) and
+/// the query must fail like any other invalid one.
+#[test]
+fn stray_paren_reports_compile_errors_instead_of_panicking() {
+    let out = run("foo)", true);
+    assert!(!out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).expect("utf8"), String::new());
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("query error"),
+        "expected per-language compile errors in:\n{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "rewriter panicked:\n{stderr}");
 }
