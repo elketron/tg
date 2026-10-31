@@ -33,12 +33,29 @@ type CompileErrors = HashMap<Language, String>;
 /// grammar cannot be set on a parser.
 type Parsers = HashMap<&'static str, Option<tree_sitter::Parser>>;
 
-/// Walk `dir` (gitignore/ignore-file rules and hidden-file rules on, matching
-/// ripgrep's defaults), parse every candidate file with its grammar, and
-/// collect the query's matches. Parse failure here means a read error or a
-/// grammar that cannot be set; unparseable content itself does not fail —
-/// tree-sitter reports an ERROR-tree root instead.
-pub fn run(dir: &Path, query_src: &str) -> Report {
+/// How a run walks and which languages it runs. `Default` is the tool's
+/// defaults: every supported language, ignore files respected, hidden files
+/// skipped (ripgrep's walking rules).
+#[derive(Debug, Default, Clone)]
+pub struct Options {
+    /// Restrict the run to these languages: the query is compiled only
+    /// against them, and files of every other supported language are
+    /// skipped and counted as skipped (like unknown extensions). Empty
+    /// means every supported language.
+    pub langs: Vec<Language>,
+    /// Do not respect ignore files (`.gitignore`, `.ignore`, ...) when
+    /// walking.
+    pub no_ignore: bool,
+    /// Include hidden files and directories when walking.
+    pub hidden: bool,
+}
+
+/// Walk `dir` (respecting `opts`: by default gitignore/ignore-file rules on
+/// and hidden files off, matching ripgrep), parse every candidate file with
+/// its grammar, and collect the query's matches. Parse failure here means a
+/// read error or a grammar that cannot be set; unparseable content itself
+/// does not fail — tree-sitter reports an ERROR-tree root instead.
+pub fn run(dir: &Path, query_src: &str, opts: &Options) -> Report {
     let shared = Arc::new(Shared {
         groups: Mutex::new(BTreeMap::new()),
         seen: Mutex::new(Default::default()),
@@ -46,10 +63,29 @@ pub fn run(dir: &Path, query_src: &str) -> Report {
         other_skipped: Mutex::new(0),
         parse_errors: Mutex::new(Vec::new()),
     });
-    let (compiled, compile_errors) = compile(&with_text_capture(query_src));
-    let (sh, cp) = (Arc::clone(&shared), Arc::clone(&compiled));
-    WalkBuilder::new(dir).build_parallel().run(move || {
-        let (shared, compiled) = (Arc::clone(&sh), Arc::clone(&cp));
+    let langs: Arc<Vec<Language>> = Arc::new(if opts.langs.is_empty() {
+        lang::LANGUAGES.to_vec()
+    } else {
+        opts.langs.clone()
+    });
+    let (compiled, compile_errors) = compile(&with_text_capture(query_src), &langs);
+    let mut builder = WalkBuilder::new(dir);
+    builder.hidden(!opts.hidden);
+    if opts.no_ignore {
+        builder
+            .parents(false)
+            .ignore(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false);
+    }
+    let (sh, cp, cl) = (
+        Arc::clone(&shared),
+        Arc::clone(&compiled),
+        Arc::clone(&langs),
+    );
+    builder.build_parallel().run(move || {
+        let (shared, compiled, langs) = (Arc::clone(&sh), Arc::clone(&cp), Arc::clone(&cl));
         let mut parsers: Parsers = HashMap::new();
         let mut cursor = tree_sitter::QueryCursor::new();
         Box::new(move |result| {
@@ -64,6 +100,10 @@ pub fn run(dir: &Path, query_src: &str) -> Report {
                 *shared.other_skipped.lock().unwrap() += 1;
                 return WalkState::Continue;
             };
+            if !langs.contains(&language) {
+                *shared.other_skipped.lock().unwrap() += 1;
+                return WalkState::Continue;
+            }
             shared.seen.lock().unwrap().insert(language);
             process_file(
                 path,
@@ -135,10 +175,10 @@ fn with_text_capture(query_src: &str) -> Cow<'_, str> {
     }
 }
 
-fn compile(query_src: &str) -> (Arc<Compiled>, CompileErrors) {
+fn compile(query_src: &str, langs: &[Language]) -> (Arc<Compiled>, CompileErrors) {
     let mut compiled: Compiled = HashMap::new();
     let mut errors: CompileErrors = HashMap::new();
-    for language in lang::LANGUAGES {
+    for &language in langs {
         for (name, grammar) in language.grammars() {
             match tree_sitter::Query::new(&grammar, query_src) {
                 Ok(query) => {
