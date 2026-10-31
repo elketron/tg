@@ -12,3 +12,4 @@ tree-sitter-md = { version = "0.5.4", features = ["parser"] }
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 streaming-iterator = "0.1.9"
+serde_json = "1.0.154"

@@ -6,6 +6,7 @@ pub mod lang;
 pub mod report;
 mod shared;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
@@ -45,7 +46,7 @@ pub fn run(dir: &Path, query_src: &str) -> Report {
         other_skipped: Mutex::new(0),
         parse_errors: Mutex::new(Vec::new()),
     });
-    let (compiled, compile_errors) = compile(query_src);
+    let (compiled, compile_errors) = compile(&with_text_capture(query_src));
     let (sh, cp) = (Arc::clone(&shared), Arc::clone(&compiled));
     WalkBuilder::new(dir).build_parallel().run(move || {
         let (shared, compiled) = (Arc::clone(&sh), Arc::clone(&cp));
@@ -78,6 +79,60 @@ pub fn run(dir: &Path, query_src: &str) -> Report {
     // Read the tallies through the locks rather than unwrapping the Arcs:
     // the visitor closures holding clones may outlive the walk's loop.
     assemble(&shared, &compiled, &compile_errors)
+}
+
+/// Tree-sitter reports matches for capture-less patterns with an empty
+/// capture list and no accessor for the matched node, so such a query
+/// could print nothing. When the query has no captures at all, append
+/// ` @text` after every top-level pattern so the matched node's text
+/// lands in the JSON output's `text` field (and the grep-style output's
+/// text slot). A `@` only counts as a real capture outside strings and `;`
+/// comments, and so do the parens that decide pattern ends; a stray
+/// top-level `)` (invalid query, reported by the compiler) does not end a
+/// pattern.
+fn with_text_capture(query_src: &str) -> Cow<'_, str> {
+    let mut out = String::with_capacity(query_src.len() + 6);
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let mut rewritten = false;
+    for c in query_src.chars() {
+        out.push(c);
+        if in_comment {
+            in_comment = c != '\n';
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '@' => return Cow::Borrowed(query_src),
+            '"' => in_string = true,
+            ';' => in_comment = true,
+            '(' => depth += 1,
+            ')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push_str(" @text");
+                    rewritten = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if rewritten {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(query_src)
+    }
 }
 
 fn compile(query_src: &str) -> (Arc<Compiled>, CompileErrors) {
@@ -163,19 +218,22 @@ fn run_matches(
     let mut matches = cursor.matches(query, tree.root_node(), bytes);
     let mut found = Vec::new();
     while let Some(m) = matches.next() {
-        let Some(c) = m.captures().first() else {
+        let mut captures: Vec<(String, String)> = Vec::new();
+        let mut line = 0;
+        for c in m.captures() {
+            let Ok(text) = c.node.utf8_text(bytes) else {
+                continue;
+            };
+            if captures.is_empty() {
+                line = c.node.start_position().row + 1;
+            }
+            let name = query.capture_names()[c.index as usize].to_string();
+            captures.push((name, text.to_string()));
+        }
+        if captures.is_empty() {
             continue;
-        };
-        let Ok(text) = c.node.utf8_text(bytes) else {
-            continue;
-        };
-        let Some(first_line) = text.lines().next() else {
-            continue;
-        };
-        found.push(Hit {
-            line: c.node.start_position().row + 1,
-            text: first_line.to_string(),
-        });
+        }
+        found.push(Hit { line, captures });
     }
     if !found.is_empty() {
         let mut guard = shared.groups.lock().unwrap();
@@ -249,5 +307,54 @@ fn assemble(shared: &Shared, compiled: &Compiled, errors: &CompileErrors) -> Rep
         per_language: shared.per_language.lock().unwrap().clone(),
         other_skipped: *shared.other_skipped.lock().unwrap(),
         fatal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_text_capture;
+
+    #[test]
+    fn a_real_capture_skips_the_rewrite() {
+        assert_eq!(with_text_capture("(paragraph) @p"), "(paragraph) @p");
+    }
+
+    #[test]
+    fn capture_less_queries_get_a_text_capture_per_top_level_pattern() {
+        assert_eq!(with_text_capture("(paragraph)"), "(paragraph) @text");
+        assert_eq!(
+            with_text_capture("(a)\n(b)"),
+            "(a) @text\n(b) @text",
+            "every top-level pattern gets its own text capture"
+        );
+        assert_eq!(
+            with_text_capture("((a) (b))"),
+            "((a) (b)) @text",
+            "nested parens do not end the pattern"
+        );
+    }
+
+    #[test]
+    fn strings_and_comments_do_not_hide_or_fake_captures_and_parens() {
+        // A paren inside a string does not close the pattern early.
+        assert_eq!(with_text_capture("(eq \"a)b\")"), "(eq \"a)b\") @text");
+        // An @ inside a comment is not a real capture: the rewrite runs.
+        assert_eq!(
+            with_text_capture("(paragraph) ; see @x"),
+            "(paragraph) @text ; see @x"
+        );
+        // A paren inside a comment does not close a pattern.
+        assert_eq!(
+            with_text_capture("(foo) ; )\n(b)"),
+            "(foo) @text ; )\n(b) @text"
+        );
+    }
+
+    #[test]
+    fn a_stray_top_level_paren_does_not_panic_the_rewriter() {
+        // Invalid query (the compiler reports it); the rewriter must leave
+        // it alone rather than underflow its depth counter.
+        assert_eq!(with_text_capture("foo)"), "foo)");
+        assert_eq!(with_text_capture("a) b)"), "a) b)");
     }
 }
