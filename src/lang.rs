@@ -3,7 +3,7 @@
 use std::path::Path;
 
 /// The languages `tg` knows about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Language {
     Markdown,
     Rust,
@@ -36,6 +36,20 @@ impl Language {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        }
+    }
+
+    /// Every grammar a query must be compiled against for this language:
+    /// one per language, except markdown, whose split parser needs both the
+    /// block and the inline grammar to see the whole tree. The `&str` is the
+    /// grammar's name, as used in error messages.
+    pub fn grammars(self) -> Vec<(&'static str, tree_sitter::Language)> {
+        match self {
+            Language::Markdown => vec![
+                ("markdown", tree_sitter_md::LANGUAGE.into()),
+                ("markdown_inline", tree_sitter_md::INLINE_LANGUAGE.into()),
+            ],
+            other => vec![(other.name(), other.grammar())],
         }
     }
 }
@@ -116,5 +130,19 @@ mod tests {
                 .is_ok()
         );
         assert!(parser.parse("- [ ] a task\n", None).is_some());
+    }
+
+    #[test]
+    fn markdown_lists_both_grammars_and_every_other_language_one() {
+        let names: Vec<_> = Language::Markdown
+            .grammars()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(names, ["markdown", "markdown_inline"]);
+        for lang in [Language::Rust, Language::TypeScript, Language::CSharp] {
+            let names: Vec<_> = lang.grammars().iter().map(|(name, _)| *name).collect();
+            assert_eq!(names, [lang.name()], "{}", lang.name());
+        }
     }
 }

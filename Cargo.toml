@@ -11,3 +11,4 @@ tree-sitter-c-sharp = "0.23.5"
 tree-sitter-md = { version = "0.5.4", features = ["parser"] }
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
+streaming-iterator = "0.1.9"
