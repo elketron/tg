@@ -111,6 +111,34 @@ fn csharp_query_prints_grouped_matches() {
     );
 }
 
+/// `(inline)` compiles in markdown's block grammar *and* the inline grammar,
+/// so both run over each markdown file; the block grammar sees the heading's
+/// inline and the paragraphs, the inline grammar re-reports the whole file as
+/// one inline node. The exact output pins the union: hits from the two
+/// grammars dedupe and sort by line then text.
+#[test]
+fn markdown_dual_grammar_union_is_deduped_and_sorted() {
+    let out = run("(inline) @i");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout),
+        Ok(join(&[
+            "README.md",
+            "  1: # Fixture",
+            "  1: Fixture",
+            "  3: Some *markdown*.",
+            "  5: Second paragraph.",
+            "",
+            "sub/note.md",
+            "  1: second note",
+        ]))
+    );
+}
+
 #[test]
 fn invalid_query_exits_with_a_clear_error() {
     let out = run("(nope) @x");
