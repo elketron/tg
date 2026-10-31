@@ -6,6 +6,7 @@ use clap::Parser;
 use tg::Options;
 use tg::lang;
 use tg::report::Report;
+use tg::template::Template;
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +44,21 @@ struct Args {
     /// overridden by them.
     #[arg(long)]
     json: bool,
+    /// Replace every match with TEMPLATE: %name expands to the text of
+    /// capture @name, %match to the text of the whole matched node; other text
+    /// is literal. A query without captures replaces whole matched nodes
+    /// (a plain template is then equivalent to %match). Dry run by
+    /// default: print a unified diff per changed file to stdout; with
+    /// --write, change the files in place and report to stderr. A file
+    /// whose matches overlap is skipped with an error. With --json, the
+    /// JSON output is suppressed; the diff/writes happen instead.
+    #[arg(short = 'r', long, value_name = "TEMPLATE")]
+    replace: Option<String>,
+    /// With -r: write the changes to the files in place instead of
+    /// printing the diff to stdout (the per-file diffs are then reported
+    /// to stderr instead). An error without -r.
+    #[arg(long)]
+    write: bool,
 }
 
 fn main() -> ExitCode {
@@ -74,10 +90,22 @@ fn main() -> ExitCode {
     let Some(query) = query_text(&args) else {
         return ExitCode::FAILURE;
     };
+    let template = match args.replace.as_deref().map(Template::parse).transpose() {
+        Ok(template) => template,
+        Err(e) => {
+            eprintln!("tg: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if args.write && template.is_none() {
+        eprintln!("tg: --write without -r is an error; without -r the run only prints matches");
+        return ExitCode::FAILURE;
+    }
     let opts = Options {
         langs: args.langs.clone(),
         no_ignore: args.no_ignore,
         hidden: args.hidden,
+        template,
     };
     let report = tg::run(
         args.dir
@@ -86,7 +114,18 @@ fn main() -> ExitCode {
         &query,
         &opts,
     );
-    print(&report, &opts, args.json);
+    print(&report, &opts, args.json, args.write);
+    if args.write {
+        for change in &report.changes {
+            if let Err(e) = std::fs::write(&change.path, &change.new) {
+                eprintln!("tg: {}: {e}", change.path.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if !report.skips.is_empty() || !report.template_errors.is_empty() {
+        return ExitCode::FAILURE;
+    }
     if report.fatal {
         eprintln!(
             "tg: the query compiled against none of the languages with files here; \
@@ -119,12 +158,32 @@ fn query_text(args: &Args) -> Option<String> {
 /// by file, each hit indented with its line number and the node's first
 /// line, a blank line between files. Everything else — query and parse
 /// errors, and the per-language parse counts — goes to stderr.
-fn print(report: &Report, opts: &Options, json: bool) {
+fn print(report: &Report, opts: &Options, json: bool, write: bool) {
     for error in &report.query_errors {
         eprintln!("tg: {}: query error: {}", error.name, error.error);
     }
     for path in &report.parse_errors {
         eprintln!("tg: {}: parse failed", path.display());
+    }
+    for error in &report.template_errors {
+        eprintln!("tg: {error}");
+    }
+    for skip in &report.skips {
+        eprintln!("tg: {}: {}", skip.name, skip.error);
+    }
+    if !report.changes.is_empty() {
+        let mut sink: Box<dyn std::io::Write> = if write {
+            Box::new(std::io::stderr().lock())
+        } else {
+            Box::new(std::io::stdout().lock())
+        };
+        for change in &report.changes {
+            let label = change.path.display().to_string();
+            let text_diff = similar::TextDiff::from_lines(&change.old, &change.new);
+            let mut diff = text_diff.unified_diff();
+            diff.header(&label, &label);
+            let _ = write!(sink, "{diff}");
+        }
     }
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
