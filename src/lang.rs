@@ -3,11 +3,12 @@
 use std::path::Path;
 
 /// The languages `tg` knows about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, clap::ValueEnum)]
 pub enum Language {
     Markdown,
     Rust,
     TypeScript,
+    #[value(name = "csharp")]
     CSharp,
 }
 

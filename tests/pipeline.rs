@@ -17,7 +17,7 @@ fn fixture_root() -> PathBuf {
 
 #[test]
 fn fixture_tree_parse_counts() {
-    let report = tg::run(&fixture_root(), NEUTRAL_QUERY);
+    let report = tg::run(&fixture_root(), NEUTRAL_QUERY, &tg::Options::default());
     let mut want = HashMap::new();
     want.insert(lang::Language::Markdown, Counts { ok: 2, failed: 0 });
     want.insert(lang::Language::Rust, Counts { ok: 1, failed: 0 });
@@ -55,7 +55,7 @@ fn unreadable_supported_file_counts_as_failed() {
         eprintln!("skipping: running as root, chmod 000 still readable");
         return;
     }
-    let report = tg::run(&dir, NEUTRAL_QUERY);
+    let report = tg::run(&dir, NEUTRAL_QUERY, &tg::Options::default());
     assert_eq!(
         report.per_language.get(&lang::Language::Rust),
         Some(&Counts { ok: 1, failed: 1 })
@@ -70,7 +70,7 @@ fn unreadable_supported_file_counts_as_failed() {
 /// reported; the other languages each report once.
 #[test]
 fn partial_compile_reports_only_fully_failed_languages() {
-    let report = tg::run(&fixture_root(), "(paragraph) @p");
+    let report = tg::run(&fixture_root(), "(paragraph) @p", &tg::Options::default());
     let names: Vec<&str> = report
         .query_errors
         .iter()

@@ -1,0 +1,3 @@
+# Walk fixture
+
+Visible paragraph.
